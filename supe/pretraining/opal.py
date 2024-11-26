@@ -132,6 +132,26 @@ class GaussianModule(nn.Module):
 
         return distribution
 
+class DynamicsModel(nn.Module):
+    hidden_dims: Sequence[int]
+    latent_dim: int
+    
+    @nn.compact
+    def __call__(self, initial_states: jnp.ndarray, skills: jnp.ndarray) -> jnp.ndarray:
+        # Now initial_states is the starting state and skills is the skill
+        # We want to predict the final state after executing the skill
+        inputs = jnp.concatenate([initial_states, skills], axis=-1)
+        
+        # MLP layers
+        x = MLP(self.hidden_dims, activate_final=True)(inputs)
+        
+        # Output layer predicts final state after H steps
+        final_state = nn.Dense(
+            initial_states.shape[-1], 
+            kernel_init=default_init(1e-2)
+        )(x)
+        
+        return final_state
 
 class VAE(nn.Module):
     hidden_dims: Sequence[int]
@@ -173,6 +193,11 @@ class VAE(nn.Module):
         self.prior_model = GaussianModule(self.hidden_dims, self.skill_dim)
 
         self.recon_model = GaussianModule(self.hidden_dims, self.action_dim)
+
+        self.dynamics_model = DynamicsModel(
+            hidden_dims=self.hidden_dims,
+            latent_dim=self.latent_dim
+        )
 
     def encode_obs(self, observations, stop_gradient=False):
         if self.cnn:
@@ -258,7 +283,12 @@ class VAE(nn.Module):
         szs = jnp.concatenate([seq_observations, zs], axis=-1)
         recon_action_dists = self.recon_model(szs)
 
-        return recon_action_dists, priors, posteriors
+        # Predict final state after skill execution
+        initial_states = seq_observations[:, 0]  # Get initial states
+        pred_final_states = self.dynamics_model(initial_states, zs[:, 0])  # Use skill to predict final state
+        true_final_states = seq_observations[:, -1]  # Get actual final states
+
+        return recon_action_dists, priors, posteriors, pred_final_states, true_final_states
 
 
 class OPAL(flax.struct.PyTreeNode):
@@ -351,15 +381,20 @@ class OPAL(flax.struct.PyTreeNode):
         rng, z_key = jax.random.split(agent.rng)
 
         def vae_loss_fn(vae_params):
-            recon_action_dists, priors, posteriors = agent.vae(
+            recon_action_dists, priors, posteriors, pred_final_states, true_final_states = agent.vae(
                 vae_params, batch["seq_observations"], batch["seq_actions"], z_key
             )
             recon_loss = -recon_action_dists.log_prob(batch["seq_actions"]).mean()
             kl_loss = posteriors.kl_divergence(priors).mean()
-            total_loss = recon_loss + agent.kl_coef * kl_loss
+            
+            dynamics_loss = ((pred_final_states - true_final_states) ** 2).mean()
+            
+            total_loss = recon_loss + agent.kl_coef * kl_loss + agent.beta_coef * dynamics_loss
+            
             return total_loss, {
                 "recon_loss": recon_loss,
                 "kl_loss": kl_loss,
+                "dynamics_loss": dynamics_loss,
                 "total_loss": total_loss,
                 "prior_mean": priors.loc.mean(),
                 "prior_std": priors.scale_diag.mean(),
