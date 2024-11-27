@@ -143,7 +143,7 @@ def main(_):
 
     # FLAGS.load_dir + "/" + str(base_name) + "/vision=False/horizon=4/seed=" + str(FLAGS.seed),
     agent = checkpoints.restore_checkpoint(
-        "/storage/ice1/4/2/atrinh31/SUPE/opal_checkpoints/kitchen-complete-v0/vision=False/horizon=4/seed=1/checkpoint_900000",
+        "/storage/ice1/4/2/atrinh31/SUPE/opal_checkpoints/kitchen-complete-v0/vision=False/horizon=4/seed=1/checkpoint_1000000",
         target=agent
     )
     # prefix="checkpoint_",
@@ -353,14 +353,14 @@ def main(_):
                 online_batch = online_batch.unfreeze()
 
                 # Update dynamics model with real data
-                print("online_batch keys:", online_batch.keys())
-                agent, dynamics_info = agent.update_dynamics(online_batch)
+                # print("online_batch keys:", online_batch.keys())
+                # agent, dynamics_info = agent.update_dynamics(online_batch)
                 
-                if i % FLAGS.log_interval == 0:
-                    wandb.log(
-                        add_prefix("dynamics/", dynamics_info),
-                        step=record_step
-                    )
+                # if i % FLAGS.log_interval == 0:
+                #     wandb.log(
+                #         add_prefix("dynamics/", dynamics_info),
+                #         step=record_step
+                #    )
 
                 if FLAGS.use_rnd_online:
                     online_rnd_reward = rnd.get_reward(
