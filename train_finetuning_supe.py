@@ -1,6 +1,7 @@
 #! /usr/bin/env python
 import gym
 import jax
+jax.config.update('jax_platform_name', 'cpu')
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,6 +23,7 @@ from supe.visualization import (get_canvas_image, get_env_and_dataset,
                                 plot_rnd_reward, plot_trajectories)
 from supe.wrappers import (MaskKitchenGoal, MetaPolicyActionWrapper,
                            TanhConverter, wrap_gym)
+from cem import CEMPlanner
 
 logging.set_verbosity(logging.FATAL)
 
@@ -139,12 +141,13 @@ def main(_):
     if len(base_name.split("-")) == 5:
         base_name = base_name[:-2]
 
+    # FLAGS.load_dir + "/" + str(base_name) + "/vision=False/horizon=4/seed=" + str(FLAGS.seed),
     agent = checkpoints.restore_checkpoint(
-        FLAGS.load_dir + "/" + str(base_name) + "/vision=False/seed=" + str(FLAGS.seed),
-        target=agent,
-        prefix="checkpoint_",
-        step=1000000,
+        "/storage/ice1/4/2/atrinh31/SUPE/opal_checkpoints/kitchen-complete-v0/vision=False/horizon=4/seed=1/checkpoint_1000000",
+        target=agent
     )
+    # prefix="checkpoint_",
+    # step=1000000,
 
     ########### META ENVIRONMENT ###########
 
@@ -205,6 +208,8 @@ def main(_):
         FLAGS.seed, observation_space, meta_env.action_space, **kwargs
     )
 
+    planner = CEMPlanner()
+
     meta_replay_buffer = ReplayBuffer(
         meta_env.observation_space,
         meta_env.action_space,
@@ -253,7 +258,17 @@ def main(_):
             action = agent.prior_model(observation[None, :])[0].sample(seed=curr_rng)
             action = tanh_converter.to_tanh(action)
         else:
-            action, meta_agent = meta_agent.sample_actions(observation)
+            # action, meta_agent = meta_agent.sample_actions(observation)
+            curr_rng, rng = jax.random.split(rng)
+            action, previous_mean = planner.plan(
+                curr_rng,
+                meta_agent,
+                agent.dynamics_model,
+                rm,
+                observation,
+                prev_mean=prev_mean,
+                is_train=True
+            )
 
         arctanh_action = tanh_converter.from_tanh(action)
         next_observation, reward, done, info = meta_env.step(arctanh_action)
@@ -323,6 +338,15 @@ def main(_):
                 )
                 online_batch = meta_replay_buffer.sample(online_batch_size)
                 online_batch = online_batch.unfreeze()
+
+                # Update dynamics model with real data
+                agent, dynamics_info = agent.update_dynamics(online_batch)
+                
+                if i % FLAGS.log_interval == 0:
+                    wandb.log(
+                        add_prefix("dynamics/", dynamics_info),
+                        step=record_step
+                    )
 
                 if FLAGS.use_rnd_online:
                     online_rnd_reward = rnd.get_reward(
@@ -450,6 +474,8 @@ def main(_):
                 num_episodes=FLAGS.eval_episodes,
                 save_video=FLAGS.save_video,
                 tanh_converter=tanh_converter,
+                planner=planner if i >= FLAGS.start_training else None,
+                rm=rm
             )
 
             for k, v in eval_info.items():
