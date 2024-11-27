@@ -12,6 +12,7 @@ def evaluate(
     agent,
     env: gym.Env,
     num_episodes: int,
+    lower_agent=None,
     tanh_converter: TanhConverter = None,
     save_video: bool = False,
     save_video_name="eval_video",
@@ -26,6 +27,7 @@ def evaluate(
     trajs = []
     cum_returns = []
     cum_lengths = []
+    dynamics_model = lower_agent.dynamics_model if lower_agent is not None else None
     for i in range(num_episodes):
         observation, done = env.reset(), False
         traj = [observation]
@@ -39,7 +41,7 @@ def evaluate(
                 action, prev_mean = planner.plan(
                     key,
                     agent,
-                    agent.dynamics_model,
+                    dynamics_model,
                     rm,
                     observation,
                     prev_mean=prev_mean,
