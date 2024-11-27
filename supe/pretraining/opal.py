@@ -558,3 +558,15 @@ class OPAL(flax.struct.PyTreeNode):
         new_train_state = self.train_state.apply_gradients(grads=grads)
         
         return self.replace(rng=rng, train_state=new_train_state), info
+
+    @property
+    def dynamics_model(self):
+        """Returns a function that can be used for dynamics prediction."""
+        def dynamics_fn(state, action):
+            return self.vae(
+                self.train_state.params,
+                state,
+                action,
+                method="dynamics_model"
+            )
+        return dynamics_fn
