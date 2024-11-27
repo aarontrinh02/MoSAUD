@@ -4,6 +4,7 @@ import absl.app
 import absl.flags
 import gym
 import jax
+jax.config.update('jax_platform_name', 'cpu')
 import matplotlib.pyplot as plt
 import numpy as np
 import tqdm
