@@ -23,7 +23,7 @@ from supe.visualization import (get_canvas_image, get_env_and_dataset,
                                 plot_rnd_reward, plot_trajectories)
 from supe.wrappers import (MaskKitchenGoal, MetaPolicyActionWrapper,
                            TanhConverter, wrap_gym)
-from cem import CEMPlanner
+from supe.planning.cem import CEMPlanner
 
 logging.set_verbosity(logging.FATAL)
 
@@ -143,7 +143,7 @@ def main(_):
 
     # FLAGS.load_dir + "/" + str(base_name) + "/vision=False/horizon=4/seed=" + str(FLAGS.seed),
     agent = checkpoints.restore_checkpoint(
-        "/storage/ice1/4/2/atrinh31/SUPE/opal_checkpoints/kitchen-complete-v0/vision=False/horizon=4/seed=1/checkpoint_1000000",
+        "/storage/ice1/4/2/atrinh31/SUPE/opal_checkpoints/kitchen-complete-v0/vision=False/horizon=4/seed=1/checkpoint_900000",
         target=agent
     )
     # prefix="checkpoint_",
@@ -208,7 +208,9 @@ def main(_):
         FLAGS.seed, observation_space, meta_env.action_space, **kwargs
     )
 
-    planner = CEMPlanner()
+    planner = CEMPlanner(
+        action_dim=meta_env.action_space.shape[0]
+    )
 
     meta_replay_buffer = ReplayBuffer(
         meta_env.observation_space,
@@ -247,6 +249,7 @@ def main(_):
     online_traj = [observation]
     env_step = 0
     record_step = 0
+    prev_mean = None
     for i in tqdm.tqdm(
         range(0, FLAGS.max_steps + 1, FLAGS.hpolicy_horizon),
         smoothing=0.1,
@@ -260,10 +263,20 @@ def main(_):
         else:
             # action, meta_agent = meta_agent.sample_actions(observation)
             curr_rng, rng = jax.random.split(rng)
-            action, previous_mean = planner.plan(
+            
+            # Define dynamics model function outside of jitted context
+            def dynamics_fn(state, action):
+                return agent.vae(
+                    agent.train_state.params,
+                    state,
+                    action,
+                    method="dynamics_model"
+                )
+            
+            action, prev_mean = planner.plan(
                 curr_rng,
                 meta_agent,
-                agent.dynamics_model,
+                dynamics_fn,  # Pass the function
                 rm,
                 observation,
                 prev_mean=prev_mean,
@@ -340,6 +353,7 @@ def main(_):
                 online_batch = online_batch.unfreeze()
 
                 # Update dynamics model with real data
+                print("online_batch keys:", online_batch.keys())
                 agent, dynamics_info = agent.update_dynamics(online_batch)
                 
                 if i % FLAGS.log_interval == 0:
