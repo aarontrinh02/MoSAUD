@@ -290,6 +290,42 @@ class VAE(nn.Module):
 
         return recon_action_dists, priors, posteriors, pred_final_states, true_final_states
 
+    def dynamics_model(self, initial_states: jnp.ndarray, skills: jnp.ndarray) -> jnp.ndarray:
+        """Predict next state given current state and skill."""
+        return self.dynamics_model(initial_states, skills)
+
+
+@partial(jax.jit, static_argnames=('vae_fn',))
+def _update_dynamics_step(params, rng, batch, vae_fn):
+    """Internal function for dynamics update."""
+    def dynamics_loss_fn(p):
+        #recon_action_dists, priors, posteriors, pred_final_states, true_final_states = vae_fn(
+        #    p,  # Pass params directly
+        #    batch["seq_observations"], 
+        #    batch["seq_actions"], 
+        #    rng
+        #)
+        current_obs = batch["observations"]
+        actions = batch["actions"]
+        next_obs = batch["next_observations"]
+        masks = batch["masks"]
+        _, _, _, pred_next_obs, _ = vae_fn(
+            p,
+            current_obs,
+            actions,
+            rng
+        )
+
+        squared_errors = ((pred_next_obs - next_obs) ** 2)
+        dynamics_loss = (squared_errors * masks).mean()
+        return dynamics_loss, {
+            "dynamics_loss": dynamics_loss,
+            "pred_error": jnp.sqrt(squared_errors.mean())
+        }
+
+    (loss, info), grads = jax.value_and_grad(dynamics_loss_fn, has_aux=True)(params)
+    return grads, info
+
 
 class OPAL(flax.struct.PyTreeNode):
     rng: jax.random.PRNGKey
@@ -509,19 +545,19 @@ class OPAL(flax.struct.PyTreeNode):
         ).mode()
         return actions
 
-    @partial(jax.jit, static_argnames=('self'))
-    def update_dynamics(self, batch: Dict[str, jnp.ndarray]) -> 'OPAL':
-        """Update dynamics model with new data."""
-        def dynamics_loss_fn(dynamics_params):
-            next_states_pred = self.dynamics_model.apply_fn(
-                {"params": dynamics_params},
-                batch["observations"],
-                batch["actions"]
-            )
-            loss = jnp.mean((next_states_pred - batch["next_observations"]) ** 2)
-            return loss, {"dynamics_loss": loss}
-
-        grads, info = jax.grad(dynamics_loss_fn, has_aux=True)(self.dynamics_model.params)
-        dynamics_model = self.dynamics_model.apply_gradients(grads=grads)
+    def update_dynamics(self, batch):
+        """Update dynamics model using batch of data."""
+        rng, key = jax.random.split(self.rng)
         
-        return self.replace(dynamics_model=dynamics_model), info
+        # Call the jitted function with vae_fn as a static argument
+        grads, info = _update_dynamics_step(
+            self.train_state.params,
+            key,
+            batch,
+            self.vae  # This will be treated as static
+        )
+        
+        # Update train state
+        new_train_state = self.train_state.apply_gradients(grads=grads)
+        
+        return self.replace(rng=rng, train_state=new_train_state), info
