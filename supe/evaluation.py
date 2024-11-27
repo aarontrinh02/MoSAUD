@@ -16,6 +16,8 @@ def evaluate(
     save_video: bool = False,
     save_video_name="eval_video",
     hilp=False,
+    planner=None,
+    rm=None
 ) -> Dict[str, float]:
 
     if save_video:
@@ -29,8 +31,22 @@ def evaluate(
         traj = [observation]
         cum_return = 0
         cum_length = 0
+        prev_mean = None
+
         while not done:
-            action = agent.eval_actions(observation)
+            if planner is not None and rm is not None:
+                key = jax.random.PRNGKey(i)
+                action, prev_mean = planner.plan(
+                    key,
+                    agent,
+                    agent.dynamics_model,
+                    rm,
+                    observation,
+                    prev_mean=prev_mean,
+                    is_train=False
+                )
+            else:
+                action = agent.eval_actions(observation)
             if tanh_converter is not None:
                 action = tanh_converter.from_tanh(action)
             if hilp:
