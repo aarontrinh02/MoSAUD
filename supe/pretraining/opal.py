@@ -299,28 +299,25 @@ class VAE(nn.Module):
 def _update_dynamics_step(params, rng, batch, vae_fn):
     """Internal function for dynamics update."""
     def dynamics_loss_fn(p):
-        #recon_action_dists, priors, posteriors, pred_final_states, true_final_states = vae_fn(
-        #    p,  # Pass params directly
-        #    batch["seq_observations"], 
-        #    batch["seq_actions"], 
-        #    rng
-        #)
-        current_obs = batch["observations"]
-        actions = batch["actions"]
-        next_obs = batch["next_observations"]
-        masks = batch["masks"]
-        _, _, _, pred_next_obs, _ = vae_fn(
+        # Create sequence format matching VAE initialization
+        seq_observations = batch["observations"][:, None, :]     # (B, 1, obs_dim)
+        seq_actions = batch["actions"][:, None, :]              # (B, 1, action_dim)
+        next_obs = batch["next_observations"][:, None, :]       # (B, 1, obs_dim)
+        
+        # Get predictions from VAE using same format as in update_vae
+        recon_action_dists, priors, posteriors, pred_final_states, true_final_states = vae_fn(
             p,
-            current_obs,
-            actions,
+            seq_observations,
+            seq_actions,
             rng
         )
-
-        squared_errors = ((pred_next_obs - next_obs) ** 2)
-        dynamics_loss = (squared_errors * masks).mean()
+        
+        # Compute dynamics loss like in update_vae
+        dynamics_loss = ((pred_final_states - true_final_states) ** 2).mean()
+        
         return dynamics_loss, {
             "dynamics_loss": dynamics_loss,
-            "pred_error": jnp.sqrt(squared_errors.mean())
+            "pred_error": jnp.sqrt(((pred_final_states - true_final_states) ** 2).mean())
         }
 
     (loss, info), grads = jax.value_and_grad(dynamics_loss_fn, has_aux=True)(params)
