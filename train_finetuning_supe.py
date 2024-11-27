@@ -486,6 +486,7 @@ def main(_):
                 meta_agent,
                 eval_meta_env,
                 num_episodes=FLAGS.eval_episodes,
+                lower_agent=agent,
                 save_video=FLAGS.save_video,
                 tanh_converter=tanh_converter,
                 planner=planner if i >= FLAGS.start_training else None,
