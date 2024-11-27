@@ -15,8 +15,9 @@ class CEMPlanner(struct.PyTreeNode):
     horizon: int = 5
     discount: float = 0.99
     min_std: float = 0.1
+    action_dim: int = None
     
-    @partial(jax.jit, static_argnames=('self'))
+    @partial(jax.jit, static_argnames=('self', 'sac_agent', 'dynamics_model', 'rm'))
     def estimate_value(self, sac_agent, dynamics_model, rm, state: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
         """Estimate value of a trajectory using dynamics model, reward module, and SAC critic."""
         def step_fn(carry, action):
@@ -35,7 +36,7 @@ class CEMPlanner(struct.PyTreeNode):
         )
         
         # Get final action from actor for final state value estimation
-        final_actions, _ = sac_agent.sample_actions(final_state)
+        final_actions, _ = sac_agent.sample_actions_jit(final_state)
         q_values = sac_agent.critic.apply_fn(
             {"params": sac_agent.critic.params},
             final_state,
@@ -46,37 +47,31 @@ class CEMPlanner(struct.PyTreeNode):
         
         return value
 
-    @partial(jax.jit, static_argnames=('self'))
-    def plan(self, key: jnp.ndarray, sac_agent, dynamics_model, rm, state: jnp.ndarray, 
-             prev_mean: jnp.ndarray = None, is_train: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Plan actions using CEM."""
-        action_dim = sac_agent.actor.apply_fn.action_dim
-
-        # Sample policy trajectories
+    @partial(jax.jit, static_argnames=('self', 'dynamics_model'))
+    def plan_step(self, key: jnp.ndarray, sac_agent, dynamics_model, rm, state: jnp.ndarray, 
+                  prev_mean: jnp.ndarray = None) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Plan step without training noise."""
+        mean = jnp.zeros((self.horizon, self.action_dim))
+        std = 2.0 * jnp.ones((self.horizon, self.action_dim))
+        
+        if prev_mean is not None:
+            mean = mean.at[:-1].set(prev_mean[1:])
+        
         policy_state = jnp.repeat(state[None], self.num_policy_traj, axis=0)
         
         def policy_step(carry, _):
             curr_state, key = carry
             key, action_key = jax.random.split(key)
-            action, _ = sac_agent.sample_actions(curr_state)
+            action = sac_agent.eval_actions_jit(curr_state)  # Use jitted version
             next_state = dynamics_model(curr_state, action)
             return (next_state, key), action
-        
-        # Roll out policy for horizon steps
+
         (_, _), policy_actions = jax.lax.scan(
             policy_step,
             (policy_state, key),
             None,
             length=self.horizon
-        )  # shape: (horizon, num_policy_traj, action_dim)
-        
-        # Initialize CEM distribution
-        mean = jnp.zeros((self.horizon, action_dim))
-        std = 2.0 * jnp.ones((self.horizon, action_dim))
-        
-        # Use previous mean if available
-        if prev_mean is not None:
-            mean = mean.at[:-1].set(prev_mean[1:])
+        )
         
         def cem_iter(carry, _):
             mean, std, key = carry
@@ -85,7 +80,7 @@ class CEMPlanner(struct.PyTreeNode):
             # Sample actions
             sample_actions = mean[:, None] + std[:, None] * jax.random.normal(
                 sample_key,
-                (self.horizon, self.num_sample_traj, action_dim)
+                (self.horizon, self.num_sample_traj, self.action_dim)
             )
             sample_actions = jnp.clip(sample_actions, -0.999, 0.999)
             
@@ -127,17 +122,33 @@ class CEMPlanner(struct.PyTreeNode):
             length=self.cem_iter
         )
         
-        # Sample final action
-        key, action_key, noise_key = jax.random.split(key, 3)
-        elite_idx = jax.random.choice(
-            action_key,
-            self.num_elites,
-            p=scores.squeeze()
-        )
-        action = elite_actions[0, elite_idx]
+        # Sample action for MPC
+        key, action_key = jax.random.split(key)
         
-        # Add noise during training
+        # Get scores from last iteration and ensure proper shape
+        scores = scores[-1]  # Get last iteration's scores
+        scores = scores.reshape(-1)  # Flatten to 1D array
+        
+        # Sample index using the scores as probabilities
+        action_idx = jax.random.choice(
+            action_key,
+            self.num_elites,  # number of elements to choose from
+            shape=(1,),       # output shape
+            p=scores         # probabilities (must sum to 1 and match length of array)
+        )[0]
+        
+        # Get the selected action
+        action = elite_actions[-1, 0, action_idx]  # Use last iteration's actions
+        
+        return action, mean, std[0]
+
+    def plan(self, key: jnp.ndarray, sac_agent, dynamics_model, rm, state: jnp.ndarray, 
+             prev_mean: jnp.ndarray = None, is_train: bool = True) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Plan actions using CEM."""
+        action, mean, std = self.plan_step(key, sac_agent, dynamics_model, rm, state, prev_mean)
+        
         if is_train:
-            action += std[0] * jax.random.normal(noise_key, action.shape)
+            key, noise_key = jax.random.split(key)
+            action += std * jax.random.normal(noise_key, action.shape)
         
         return jnp.clip(action, -0.999, 0.999), mean
