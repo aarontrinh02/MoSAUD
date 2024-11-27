@@ -3,7 +3,7 @@ Modified from Seohong's OPAL implementation in offline METRA
 """
 
 from functools import partial
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Dict
 
 import distrax
 import flax
@@ -508,3 +508,20 @@ class OPAL(flax.struct.PyTreeNode):
             agent.train_state.params, observations, skills=skills, method="act"
         ).mode()
         return actions
+
+    @partial(jax.jit, static_argnames=('self'))
+    def update_dynamics(self, batch: Dict[str, jnp.ndarray]) -> 'OPAL':
+        """Update dynamics model with new data."""
+        def dynamics_loss_fn(dynamics_params):
+            next_states_pred = self.dynamics_model.apply_fn(
+                {"params": dynamics_params},
+                batch["observations"],
+                batch["actions"]
+            )
+            loss = jnp.mean((next_states_pred - batch["next_observations"]) ** 2)
+            return loss, {"dynamics_loss": loss}
+
+        grads, info = jax.grad(dynamics_loss_fn, has_aux=True)(self.dynamics_model.params)
+        dynamics_model = self.dynamics_model.apply_gradients(grads=grads)
+        
+        return self.replace(dynamics_model=dynamics_model), info
