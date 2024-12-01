@@ -151,6 +151,23 @@ def main(_):
     # prefix="checkpoint_",
     # step=1000000,
 
+    # Define dynamics_fn here
+    def dynamics_fn(state, action):
+        """Predict next state using the agent's dynamics model.
+        
+        Args:
+            state: State array with shape (..., state_dim)
+            action: Action array with shape (..., action_dim)
+        Returns:
+            next_state: Predicted next state with same shape as state
+        """
+        return agent.vae(
+            agent.train_state.params,
+            state,
+            action,
+            method="dynamics_model"
+        )
+
     ########### META ENVIRONMENT ###########
 
     rng, episode_rng = jax.random.split(rng)
@@ -209,11 +226,6 @@ def main(_):
     meta_agent = globals()[model_cls].create(
         FLAGS.seed, observation_space, meta_env.action_space, **kwargs
     )
-
-    # planner = CEMPlanner(
-    #     skill_dim=meta_env.action_space.shape[0]
-    # )
-    print(f"skill_dim: {meta_env.action_space.shape[0]}")
 
     meta_replay_buffer = ReplayBuffer(
         meta_env.observation_space,
@@ -289,28 +301,21 @@ def main(_):
                 return value
             #PLANNING
             observation_jax = jnp.array(observation)
-            print("Observation shape: ", observation_jax.shape)
             z = jnp.tile(observation_jax[None, :], (25, 1))
-            print("Z shape: ", z.shape)
             policy_ac = []
             for t in range(5):
                 policy_ac.append(meta_agent.sample_actions(z)[0])
                 z = dynamics_fn(z, policy_ac[t])
             policy_ac = jnp.stack(policy_ac, axis=0)
-            print("Policy action shape: ", policy_ac.shape)
             z = jnp.tile(observation_jax[None, :], (25 + 512, 1))
-            print("Z shape: ", z.shape)
             mean = jnp.zeros((5, 8))
             std = 2.0 * jnp.ones((5, 8))
             for t in range(6):
                 key, rng = jax.random.split(rng)
                 sample_ac = jnp.expand_dims(mean, axis=1) + jnp.expand_dims(std, axis=1) * jax.random.normal(key, shape=(5, 512, 8))
                 sample_ac = jnp.clip(sample_ac, -0.999, 0.999)
-                print("Sample action shape: ", sample_ac.shape)
                 ac = jnp.concatenate([sample_ac, policy_ac], axis=1)
-                print("AC shape: ", ac.shape)
                 imagine_return = estimate_value(z, ac)
-                print("Imagine return shape: ", imagine_return.shape)
                 idxs = jnp.argsort(imagine_return, axis=0)
                 idxs = idxs[-64 :]
                 elite_value = imagine_return[idxs]
@@ -319,8 +324,6 @@ def main(_):
                 score = jnp.exp(0.5 * (elite_value - jnp.max(elite_value)))
                 score = (score / jnp.sum(score))
                 score = jnp.expand_dims(jnp.expand_dims(score, 0), -1)
-                print("Score shape: ", score.shape)
-                print("Elite action shape: ", elite_action.shape)
                 new_mean = jnp.sum(score * elite_action, axis=1)
                 new_std = jnp.sqrt(jnp.sum(score * (elite_action - jnp.expand_dims(new_mean, 1)) ** 2, axis=1))
 
@@ -328,20 +331,20 @@ def main(_):
                 std = jnp.clip(new_std, 0.05, 2)
 
             score = score.squeeze(0).squeeze(-1)
-            print("Score shape after squeeze: ", score.shape)
             score = np.array(score)
-            print("Score shape after numpy: ", score.shape)
             ac = elite_action[0, jax.random.choice(key, 64, p=score)]
-            print("AC shape: ", ac.shape)
             key, rng = jax.random.split(rng)
             noise = jax.random.normal(key, shape=ac.shape) * std[0]
             ac += noise
             action = jnp.clip(ac, -0.999, 0.999)
             action = np.array(action)
-            print("Action shape: ", action.shape)
 
         arctanh_action = tanh_converter.from_tanh(action)
         next_observation, reward, done, info = meta_env.step(arctanh_action)
+        print("observation:", observation)
+        print("next_observation:", next_observation)
+        print("next_observation prediction:", dynamics_fn(observation, arctanh_action))
+        print("difference:", dynamics_fn(observation, arctanh_action) - next_observation)
 
         env_step += FLAGS.hpolicy_horizon
 
