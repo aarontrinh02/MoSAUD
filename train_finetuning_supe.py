@@ -1,6 +1,7 @@
 #! /usr/bin/env python
 import gym
 import jax
+import torch
 jax.config.update('jax_platform_name', 'cpu')
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -11,6 +12,7 @@ from flax.training import checkpoints
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from ml_collections import config_flags
 import wandb
+import gc
 
 from supe.agents import RM, RND, SACLearner  # NOQA
 from supe.data import ChunkDataset, D4RLDataset, ReplayBuffer
@@ -23,7 +25,7 @@ from supe.visualization import (get_canvas_image, get_env_and_dataset,
                                 plot_rnd_reward, plot_trajectories)
 from supe.wrappers import (MaskKitchenGoal, MetaPolicyActionWrapper,
                            TanhConverter, wrap_gym)
-from supe.planning.cem import CEMPlanner
+# from supe.planning.cem import CEMPlanner
 
 logging.set_verbosity(logging.FATAL)
 
@@ -208,9 +210,10 @@ def main(_):
         FLAGS.seed, observation_space, meta_env.action_space, **kwargs
     )
 
-    planner = CEMPlanner(
-        action_dim=meta_env.action_space.shape[0]
-    )
+    # planner = CEMPlanner(
+    #     skill_dim=meta_env.action_space.shape[0]
+    # )
+    print(f"skill_dim: {meta_env.action_space.shape[0]}")
 
     meta_replay_buffer = ReplayBuffer(
         meta_env.observation_space,
@@ -250,6 +253,11 @@ def main(_):
     env_step = 0
     record_step = 0
     prev_mean = None
+
+    # Add memory management configuration
+    jax.config.update('jax_disable_jit', False)  # Ensure JIT is enabled
+    jax.config.update('jax_debug_nans', False)   # Disable NaN checking
+    
     for i in tqdm.tqdm(
         range(0, FLAGS.max_steps + 1, FLAGS.hpolicy_horizon),
         smoothing=0.1,
@@ -262,9 +270,7 @@ def main(_):
             action = tanh_converter.to_tanh(action)
         else:
             # action, meta_agent = meta_agent.sample_actions(observation)
-            curr_rng, rng = jax.random.split(rng)
             
-            # Define dynamics model function outside of jitted context
             def dynamics_fn(state, action):
                 return agent.vae(
                     agent.train_state.params,
@@ -272,16 +278,67 @@ def main(_):
                     action,
                     method="dynamics_model"
                 )
-            
-            action, prev_mean = planner.plan(
-                curr_rng,
-                meta_agent,
-                dynamics_fn,  # Pass the function
-                rm,
-                observation,
-                prev_mean=prev_mean,
-                is_train=True
-            )
+
+            def estimate_value(state, actions, horizon=5):
+                value, discount = 0, 1
+                for t in range(horizon):
+                    reward = rnd.get_reward(state, actions[t])
+                    state = dynamics_fn(state, actions[t])
+                    value += discount * reward
+                value += discount * meta_agent.get_q(state, meta_agent.sample_actions(state)[0])
+                return value
+            #PLANNING
+            observation_jax = jnp.array(observation)
+            print("Observation shape: ", observation_jax.shape)
+            z = jnp.tile(observation_jax[None, :], (25, 1))
+            print("Z shape: ", z.shape)
+            policy_ac = []
+            for t in range(5):
+                policy_ac.append(meta_agent.sample_actions(z)[0])
+                z = dynamics_fn(z, policy_ac[t])
+            policy_ac = jnp.stack(policy_ac, axis=0)
+            print("Policy action shape: ", policy_ac.shape)
+            z = jnp.tile(observation_jax[None, :], (25 + 512, 1))
+            print("Z shape: ", z.shape)
+            mean = jnp.zeros((5, 8))
+            std = 2.0 * jnp.ones((5, 8))
+            for t in range(6):
+                key, rng = jax.random.split(rng)
+                sample_ac = jnp.expand_dims(mean, axis=1) + jnp.expand_dims(std, axis=1) * jax.random.normal(key, shape=(5, 512, 8))
+                sample_ac = jnp.clip(sample_ac, -0.999, 0.999)
+                print("Sample action shape: ", sample_ac.shape)
+                ac = jnp.concatenate([sample_ac, policy_ac], axis=1)
+                print("AC shape: ", ac.shape)
+                imagine_return = estimate_value(z, ac)
+                print("Imagine return shape: ", imagine_return.shape)
+                idxs = jnp.argsort(imagine_return, axis=0)
+                idxs = idxs[-64 :]
+                elite_value = imagine_return[idxs]
+                elite_action = ac[:, idxs]
+
+                score = jnp.exp(0.5 * (elite_value - jnp.max(elite_value)))
+                score = (score / jnp.sum(score))
+                score = jnp.expand_dims(jnp.expand_dims(score, 0), -1)
+                print("Score shape: ", score.shape)
+                print("Elite action shape: ", elite_action.shape)
+                new_mean = jnp.sum(score * elite_action, axis=1)
+                new_std = jnp.sqrt(jnp.sum(score * (elite_action - jnp.expand_dims(new_mean, 1)) ** 2, axis=1))
+
+                mean = 0.1 * new_mean + 0.9 * mean
+                std = jnp.clip(new_std, 0.05, 2)
+
+            score = score.squeeze(0).squeeze(-1)
+            print("Score shape after squeeze: ", score.shape)
+            score = np.array(score)
+            print("Score shape after numpy: ", score.shape)
+            ac = elite_action[0, jax.random.choice(key, 64, p=score)]
+            print("AC shape: ", ac.shape)
+            key, rng = jax.random.split(rng)
+            noise = jax.random.normal(key, shape=ac.shape) * std[0]
+            ac += noise
+            action = jnp.clip(ac, -0.999, 0.999)
+            action = np.array(action)
+            print("Action shape: ", action.shape)
 
         arctanh_action = tanh_converter.from_tanh(action)
         next_observation, reward, done, info = meta_env.step(arctanh_action)
@@ -486,10 +543,8 @@ def main(_):
                 meta_agent,
                 eval_meta_env,
                 num_episodes=FLAGS.eval_episodes,
-                lower_agent=agent,
                 save_video=FLAGS.save_video,
                 tanh_converter=tanh_converter,
-                planner=planner if i >= FLAGS.start_training else None,
                 rm=rm
             )
 
@@ -527,6 +582,15 @@ def main(_):
                 wandb.log(
                     {f"visualize/offline_data_directions": image}, step=record_step
                 )
+
+        # Add periodic memory cleanup
+        if i % 100 == 0:  # Adjust frequency as needed
+            gc.collect()
+            jax.clear_caches()
+        
+        # Use gradient checkpointing for large operations
+        #if hasattr(agent, 'update_dynamics'):
+        #    agent = agent.replace(use_checkpointing=True)
 
 
 if __name__ == "__main__":
