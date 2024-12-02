@@ -12,12 +12,10 @@ def evaluate(
     agent,
     env: gym.Env,
     num_episodes: int,
-    lower_agent=None,
     tanh_converter: TanhConverter = None,
-    save_video: bool = False,
+    save_video: bool = True,
     save_video_name="eval_video",
     hilp=False,
-    planner=None,
     rm=None
 ) -> Dict[str, float]:
 
@@ -27,28 +25,14 @@ def evaluate(
     trajs = []
     cum_returns = []
     cum_lengths = []
-    dynamics_model = lower_agent.dynamics_model if lower_agent is not None else None
     for i in range(num_episodes):
         observation, done = env.reset(), False
         traj = [observation]
         cum_return = 0
         cum_length = 0
-        prev_mean = None
 
         while not done:
-            if planner is not None and rm is not None:
-                key = jax.random.PRNGKey(i)
-                action, prev_mean = planner.plan(
-                    key,
-                    agent,
-                    dynamics_model,
-                    rm,
-                    observation,
-                    prev_mean=prev_mean,
-                    is_train=False
-                )
-            else:
-                action = agent.eval_actions(observation)
+            action = agent.eval_actions(observation)
             if tanh_converter is not None:
                 action = tanh_converter.from_tanh(action)
             if hilp:
