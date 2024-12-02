@@ -163,3 +163,7 @@ exp_data
 d4rl
 wandb
 opal_checkpoints
+data 
+hilp 
+hilp_checkpoints
+jaxrl_m

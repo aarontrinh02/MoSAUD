@@ -88,10 +88,10 @@ class SeqEncoder(nn.Module):
     ):
         B, C, D = seq_observations.shape
         observations = jnp.reshape(seq_observations, (B * C, D))
-        outputs = jnp.reshape(self.obs_mlp(observations), (B, C, -1))
+        outputs = self.obs_mlp(observations) 
+        outputs = jnp.reshape(outputs, (B, C, -1))
         outputs = jnp.concatenate([outputs, seq_actions], axis=-1)
-
-        for recur in self.recurs:
+        for i, recur in enumerate(self.recurs):
             outputs = recur(outputs)
         if self.recur_output == "concat":
             outputs = jnp.reshape(outputs, (B, -1))
@@ -295,24 +295,27 @@ class VAE(nn.Module):
         return self.dynamics_model(initial_states, skills)
 
 
-@partial(jax.jit, static_argnames=('vae_fn',))
-def _update_dynamics_step(params, rng, batch, vae_fn):
+@partial(jax.jit)
+def _update_dynamics_step(params, rng, batch):
     """Internal function for dynamics update."""
     def dynamics_loss_fn(p):
-        # Create sequence format matching VAE initialization
-        seq_observations = batch["observations"][:, None, :]     # (B, 1, obs_dim)
-        seq_actions = batch["actions"][:, None, :]              # (B, 1, action_dim)
-        next_obs = batch["next_observations"][:, None, :]       # (B, 1, obs_dim)
+        # The dynamics model parameters are nested within the VAE params
+        dynamics_params = p['dynamics_model']  # Adjust this path based on your actual param structure
         
-        # Get predictions from VAE using same format as in update_vae
-        recon_action_dists, priors, posteriors, pred_final_states, true_final_states = vae_fn(
-            p,
-            seq_observations,
-            seq_actions,
-            rng
-        )
+        # Get initial states and next states
+        initial_states = batch["observations"]
+        true_final_states = batch["next_observations"]
         
-        # Compute dynamics loss like in update_vae
+        # Get skills from batch
+        skills = batch["actions"]  # The high-level actions are the skills
+        
+        # Forward pass through just the dynamics model
+        pred_final_states = DynamicsModel(
+            hidden_dims=[256, 256],  # match your model's hidden dims
+            latent_dim=initial_states.shape[-1]
+        ).apply({'params': dynamics_params}, initial_states, skills)
+        
+        # Compute MSE loss
         dynamics_loss = ((pred_final_states - true_final_states) ** 2).mean()
         
         return dynamics_loss, {
@@ -322,7 +325,6 @@ def _update_dynamics_step(params, rng, batch, vae_fn):
 
     (loss, info), grads = jax.value_and_grad(dynamics_loss_fn, has_aux=True)(params)
     return grads, info
-
 
 class OPAL(flax.struct.PyTreeNode):
     rng: jax.random.PRNGKey
@@ -546,12 +548,11 @@ class OPAL(flax.struct.PyTreeNode):
         """Update dynamics model using batch of data."""
         rng, key = jax.random.split(self.rng)
         
-        # Call the jitted function with vae_fn as a static argument
+        # Call the jitted function without vae_fn
         grads, info = _update_dynamics_step(
             self.train_state.params,
             key,
-            batch,
-            self.vae  # This will be treated as static
+            batch
         )
         
         # Update train state
