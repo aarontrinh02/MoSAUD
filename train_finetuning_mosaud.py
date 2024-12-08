@@ -149,7 +149,7 @@ def main(_):
         base_name = base_name[:-2]
 
     agent = checkpoints.restore_checkpoint(
-        "~/scratch/SUPE3/opal_checkpoints/kitchen-partial-v0/vision=False/horizon=4/seed=1/checkpoint_1000000",
+        "PATH_TO_PRETRAINING",
         target=agent
     )
 
