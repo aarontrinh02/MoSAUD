@@ -23,5 +23,5 @@ Replace the env_name with `kitchen-partial-v0` and `kitchen-complete-v0` to test
 #### Kitchen
 
 ```
-python train_finetuning_supe.py --config.backup_entropy=False --config.num_min_qs=2 --offline_relabel_type=pred --use_rnd_offline=True --use_rnd_online=True --env_name=kitchen-mixed-v0 --seed=1 --config.init_temperature=1.0
+python train_finetuning_mosaud.py --config.backup_entropy=False --config.num_min_qs=2 --offline_relabel_type=pred --use_rnd_offline=True --use_rnd_online=True --env_name=kitchen-mixed-v0 --seed=1 --config.init_temperature=1.0
 ```
