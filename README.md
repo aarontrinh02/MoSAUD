@@ -1,7 +1,7 @@
 # Accelerating Model-Based Reinforcement Learning with Skill Abstraction from Unlabeled Data
  
 
-The code is built off of [SUPE](https://github.com/rail-berkeley/supe).
+The code is built off of [SUPE](https://github.com/rail-berkeley/supe) with inspiration from [SkiMo](https://github.com/clvrai/skimo).
 
 Before setting up the environment, make sure that MuJoCo and the dependencies for mujoco-py are installed (https://github.com/openai/mujoco-py). Then, run the `create_env.sh` script, which will create the conda environment and download the pretrained checkpoints.
 
